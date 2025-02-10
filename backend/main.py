@@ -14,10 +14,21 @@ from passlib.context import CryptContext
 from motor.motor_asyncio import AsyncIOMotorClient
 from cryptography.fernet import Fernet
 import secrets
+from contextlib import asynccontextmanager
 
 # Rate limiting
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    app.mongodb = await connect_to_mongodb()
+    print("Connected to MongoDB")
+    yield
+    # Shutdown
+    app.mongodb.client.close()
+
+app = FastAPI(lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -42,10 +53,17 @@ fernet = Fernet(ENCRYPTION_KEY)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# MongoDB connection
-MONGODB_URL = "mongodb://localhost:27017"  # Store this in environment variables
-client = AsyncIOMotorClient(MONGODB_URL)
-db = client.saveddit
+# MongoDB connection setup
+async def connect_to_mongodb():
+    try:
+        MONGODB_URL = "mongodb://localhost:27017"
+        client = AsyncIOMotorClient(MONGODB_URL)
+        # Verify connection
+        await client.admin.command('ping')
+        return client.saveddit
+    except Exception as e:
+        print(f"Error connecting to MongoDB: {e}")
+        raise
 
 # Models
 class UserCreate(BaseModel):
@@ -98,7 +116,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     except jwt.PyJWTError:
         raise credentials_exception
         
-    user = await db.users.find_one({"username": username})
+    user = await app.mongodb.users.find_one({"username": username})
     if user is None:
         raise credentials_exception
     return User(**user)
@@ -130,7 +148,7 @@ async def add_security_headers(request: Request, call_next):
 @app.post("/auth/register", response_model=User)
 @limiter.limit("5/minute")
 async def register_user(request: Request, user: UserCreate):
-    if await db.users.find_one({"email": user.email}):
+    if await app.mongodb.users.find_one({"email": user.email}):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
@@ -143,13 +161,13 @@ async def register_user(request: Request, user: UserCreate):
         "reddit_credentials_stored": False
     }
     
-    await db.users.insert_one(user_dict)
+    await app.mongodb.users.insert_one(user_dict)
     return User(**user_dict)
 
 @app.post("/auth/login", response_model=Token)
 @limiter.limit("5/minute")
 async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
-    user = await db.users.find_one({"username": form_data.username})
+    user = await app.mongodb.users.find_one({"username": form_data.username})
     if not user or not verify_password(form_data.password, user["password"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -184,7 +202,7 @@ async def store_reddit_credentials(
             "password": credentials.password
         })
         
-        await db.users.update_one(
+        await app.mongodb.users.update_one(
             {"email": current_user.email},
             {
                 "$set": {
@@ -203,7 +221,7 @@ async def store_reddit_credentials(
 
 @app.get("/reddit/saved", response_model=List[Dict])
 async def get_saved_items(current_user: User = Depends(get_current_user)):
-    user = await db.users.find_one({"email": current_user.email})
+    user = await app.mongodb.users.find_one({"email": current_user.email})
     
     if not user.get("reddit_credentials_stored"):
         raise HTTPException(

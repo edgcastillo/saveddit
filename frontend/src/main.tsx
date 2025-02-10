@@ -8,7 +8,7 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
       <Routes>
-        <Route path="/saveddit" element={<App />} />
+        <Route path="/saveddit/*" element={<App />} />
       </Routes>
     </BrowserRouter>
   </StrictMode>,
