@@ -1,3 +1,9 @@
 fastapi
 uvicorn
 praw
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+motor
+pydantic[email]
+cryptography
